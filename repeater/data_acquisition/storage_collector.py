@@ -337,15 +337,41 @@ class StorageCollector:
                 return
 
             node_name = self.config.get("repeater", {}).get("node_name", "Unknown")
-            packet = PacketRecord.from_packet_record(
-                packet_record, origin=node_name, origin_id=self.mqtt_handler.public_key
+
+            # Only publish an ``rx`` record for a packet we actually heard on the air.
+            #
+            # A packet_record with no RF measurement at all was never received: it is
+            # either this node's own origination or internal repeater<->companion
+            # traffic, because the companions share this process and this radio. The
+            # wire schema has no "not measured" value, so those records went out as
+            # RSSI "0" -- which every aggregator reads as 0 dBm, the strongest signal
+            # physically possible. The effect is that whatever node the packet came
+            # from appears to be sitting next to us, and short, real links become
+            # indistinguishable from long ones. Own transmissions are still published
+            # below as ``direction: "tx"``, which is what they actually are.
+            #
+            # The test is both-zero, not either-zero: a genuine reception can read
+            # exactly 0.0 dB SNR, but never together with exactly 0 dBm RSSI.
+            measured = not (
+                float(packet_record.get("rssi") or 0) == 0.0
+                and float(packet_record.get("snr") or 0) == 0.0
             )
 
-            if packet:
-                self.mqtt_handler.publish_packet(packet.to_dict())
-                logger.debug(f"Published packet type 0x{packet_type:02X} to mqtt")
+            if not measured:
+                logger.debug(
+                    f"Skipped mqtt rx publish of type 0x{packet_type:02X}: no RF "
+                    "measurement, so this packet was not received over the air"
+                )
             else:
-                logger.debug("Skipped mqtt publish: packet missing raw_packet data")
+                packet = PacketRecord.from_packet_record(
+                    packet_record, origin=node_name, origin_id=self.mqtt_handler.public_key
+                )
+
+                if packet:
+                    self.mqtt_handler.publish_packet(packet.to_dict())
+                    logger.debug(f"Published packet type 0x{packet_type:02X} to mqtt")
+                else:
+                    logger.debug("Skipped mqtt publish: packet missing raw_packet data")
 
             # Publish this node's own transmission of the packet as a separate
             # ``direction: "tx"`` record. The radio is half-duplex, so nothing we
